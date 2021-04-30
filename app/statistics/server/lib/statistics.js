@@ -1,5 +1,6 @@
 import os from 'os';
 
+import moment from 'moment';
 import _ from 'underscore';
 import { Meteor } from 'meteor/meteor';
 import { InstanceStatus } from 'meteor/konecty:multiple-instances-status';
@@ -15,12 +16,16 @@ import {
 	LivechatVisitors,
 	Integrations,
 	Statistics,
+	LivechatCustomField,
+	LivechatDepartment,
+	LivechatTrigger,
 } from '../../../models/server';
 import { settings } from '../../../settings/server';
 import { Info, getMongoInfo } from '../../../utils/server';
 import { Migrations } from '../../../migrations/server';
 import { getStatistics as federationGetStatistics } from '../../../federation/server/functions/dashboard';
-import { NotificationQueue, Users as UsersRaw } from '../../../models/server/raw';
+import { NotificationQueue, Users as UsersRaw, LivechatAgentActivity } from '../../../models/server/raw';
+import { LivechatRooms } from '../../../models';
 import { readSecondaryPreferred } from '../../../../server/database/readSecondaryPreferred';
 import { getAppsStatistics } from './getAppsStatistics';
 import { getStatistics as getEnterpriseStatistics } from '../../../../ee/app/license/server';
@@ -54,9 +59,58 @@ const getUserLanguages = (totalUsers) => {
 	return languages;
 };
 
+
 export const statistics = {
-	get: function _getStatistics() {
+	getKeyHavingMaxValue(map, def) {
+		let maxValue = 0;
+		let maxKey = def;	// default
+
+		map.forEach((value, key) => {
+			if (value > maxValue) {
+				maxValue = value;
+				maxKey = key;
+			}
+		});
+
+		return maxKey;
+	},
+	get: async function _getStatistics() {
 		const readPreference = readSecondaryPreferred(Uploads.model.rawDatabase());
+		const totalMessagesOnWeekday = new Map();	// total messages on weekdays i.e Monday, Tuesday...
+		let totalConversations = 0; // Total conversations
+		let openConversations = 0; // open conversations
+		let totalMessages = 0; // total msgs
+
+		const today = moment(new Date());
+		const start = moment(new Date(today.year(), today.month(), today.date(), 0, 0, 0));
+		const end = moment(new Date(today.year(), today.month(), today.date(), 23, 59, 59));
+
+		const summarize = (m) => ({ metrics, msgs }) => {
+			if (metrics && !metrics.chatDuration) {
+				openConversations++;
+			}
+			totalMessages += msgs;
+
+			const weekday = m.format('dddd'); // @string: Monday, Tuesday ...
+			totalMessagesOnWeekday.set(weekday, totalMessagesOnWeekday.has(weekday) ? totalMessagesOnWeekday.get(weekday) + msgs : msgs);
+		};
+
+		for (let m = moment(start); m.diff(end, 'days') <= 0; m.add(1, 'days')) {
+			const date = {
+				gte: m,
+				lt: moment(m).add(1, 'days'),
+			};
+
+			const result = Promise.await(LivechatRooms.getAnalyticsBetweenDate(date).toArray());
+			totalConversations += result.length;
+
+			result.forEach(summarize(m));
+		}
+
+		const averageOfAvailableServiceTime = (await LivechatAgentActivity.findAllAverageAvailableServiceTime({
+			date: parseInt(moment(new Date()).format('YYYYMMDD')),
+			departmentId: null,
+		}))[0];
 
 		const statistics = {};
 
@@ -113,8 +167,22 @@ export const statistics = {
 		// livechat agents
 		statistics.totalLivechatAgents = Users.findAgents().count();
 
+		// livechat department
+		statistics.totalLivechatDepartments = LivechatDepartment.find().count();
+
 		// livechat enabled
 		statistics.livechatEnabled = settings.get('Livechat_enabled');
+
+
+		// livechat analytics
+		statistics.busiestDay = this.getKeyHavingMaxValue(totalMessagesOnWeekday, '-');
+		statistics.openConversations = openConversations;
+		statistics.totalConversations = totalConversations;
+		statistics.totalMessages = totalMessages;
+		statistics.averageOfAvailableServiceTime = averageOfAvailableServiceTime;
+		statistics.totalLivechatCustomFields = LivechatCustomField.find().count();
+		statistics.totalLivechatTriggers = LivechatTrigger.find().count();
+
 
 		// Message statistics
 		statistics.totalChannelMessages = _.reduce(Rooms.findByType('c', { fields: { msgs: 1 } }).fetch(), function _countChannelMessages(num, room) { return num + room.msgs; }, 0);
@@ -206,6 +274,8 @@ export const statistics = {
 		statistics.pushQueue = Promise.await(NotificationQueue.col.estimatedDocumentCount());
 
 		statistics.enterprise = getEnterpriseStatistics();
+
+		console.log(statistics);
 
 		return statistics;
 	},
