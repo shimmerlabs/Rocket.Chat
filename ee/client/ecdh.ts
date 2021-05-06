@@ -31,7 +31,7 @@ async function initEncryptedSession(): Promise<void> {
 	const clientPublicKey = await session.init();
 
 	try {
-		const response = await fetch('/api/ecdh_proxy/initEncryptedSession', {
+		const response = await fetch('api/ecdh_proxy/initEncryptedSession', {
 			method: 'POST',
 			headers: {
 				'Content-Type': 'application/json',
